@@ -6,6 +6,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <math.h>
 #include <grp.h>
 #include <pwd.h>
 #include <stdarg.h>
@@ -18,6 +19,9 @@
 #include <X11/keysym.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/XKBlib.h>
+#include <X11/Xresource.h>
+#include <Imlib2.h>
 
 #include "arg.h"
 #include "util.h"
@@ -28,6 +32,7 @@ enum {
 	INIT,
 	INPUT,
 	FAILED,
+	CAPS,
 	NUMCOLS
 };
 
@@ -35,6 +40,7 @@ struct lock {
 	int screen;
 	Window root, win;
 	Pixmap pmap;
+	Pixmap bgmap;
 	unsigned long colors[NUMCOLS];
 };
 
@@ -44,7 +50,22 @@ struct xrandr {
 	int errbase;
 };
 
+/* Xresources preferences */
+enum resource_type {
+	STRING = 0,
+	INTEGER = 1,
+	FLOAT = 2
+};
+
+typedef struct {
+	char *name;
+	enum resource_type type;
+	void *dst;
+} ResourcePref;
+
 #include "config.h"
+
+Imlib_Image image;
 
 static void
 die(const char *errstr, ...)
@@ -130,15 +151,19 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 {
 	XRRScreenChangeNotifyEvent *rre;
 	char buf[32], passwd[256], *inputhash;
-	int num, screen, running, failure, oldc;
-	unsigned int len, color;
+	int caps, num, screen, running, failure, oldc;
+	unsigned int len, color, indicators;
 	KeySym ksym;
 	XEvent ev;
 
 	len = 0;
+	caps = 0;
 	running = 1;
 	failure = 0;
 	oldc = INIT;
+
+	if (!XkbGetIndicatorState(dpy, XkbUseCoreKbd, &indicators))
+		caps = indicators & 1;
 
 	while (running && !XNextEvent(dpy, &ev)) {
 		if (ev.type == KeyPress) {
@@ -179,6 +204,9 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 				if (len)
 					passwd[--len] = '\0';
 				break;
+			case XK_Caps_Lock:
+				caps = !caps;
+				break;
 			default:
 				if (num && !iscntrl((int)buf[0]) &&
 				    (len + num < sizeof(passwd))) {
@@ -187,12 +215,13 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 				}
 				break;
 			}
-			color = len ? INPUT : ((failure || failonclear) ? FAILED : INIT);
+			color = len ? (caps ? CAPS : INPUT) : (failure || failonclear ? FAILED : INIT);
 			if (running && oldc != color) {
 				for (screen = 0; screen < nscreens; screen++) {
-					XSetWindowBackground(dpy,
-					                     locks[screen]->win,
-					                     locks[screen]->colors[color]);
+                                        if (locks[screen]->bgmap)
+                                                XSetWindowBackgroundPixmap(dpy, locks[screen]->win, locks[screen]->bgmap);
+                                        else
+                                                XSetWindowBackground(dpy, locks[screen]->win, locks[screen]->colors[0]);
 					XClearWindow(dpy, locks[screen]->win);
 				}
 				oldc = color;
@@ -235,6 +264,17 @@ lockscreen(Display *dpy, struct xrandr *rr, int screen)
 	lock->screen = screen;
 	lock->root = RootWindow(dpy, lock->screen);
 
+        if(image)
+        {
+            lock->bgmap = XCreatePixmap(dpy, lock->root, DisplayWidth(dpy, lock->screen), DisplayHeight(dpy, lock->screen), DefaultDepth(dpy, lock->screen));
+            imlib_context_set_display(dpy);
+            imlib_context_set_visual(DefaultVisual(dpy, lock->screen));
+            imlib_context_set_colormap(DefaultColormap(dpy, lock->screen));
+            imlib_context_set_drawable(lock->bgmap);
+            imlib_render_image_on_drawable(0, 0);
+            imlib_free_image();
+        }
+
 	for (i = 0; i < NUMCOLS; i++) {
 		XAllocNamedColor(dpy, DefaultColormap(dpy, lock->screen),
 		                 colorname[i], &color, &dummy);
@@ -251,6 +291,8 @@ lockscreen(Display *dpy, struct xrandr *rr, int screen)
 	                          CopyFromParent,
 	                          DefaultVisual(dpy, lock->screen),
 	                          CWOverrideRedirect | CWBackPixel, &wa);
+        if(lock->bgmap)
+          XSetWindowBackgroundPixmap(dpy, lock->win, lock->bgmap);
 	lock->pmap = XCreateBitmapFromData(dpy, lock->win, curs, 8, 8);
 	invisible = XCreatePixmapCursor(dpy, lock->pmap, lock->pmap,
 	                                &color, &color, 0, 0);
@@ -295,6 +337,57 @@ lockscreen(Display *dpy, struct xrandr *rr, int screen)
 		fprintf(stderr, "slock: unable to grab keyboard for screen %d\n",
 		        screen);
 	return NULL;
+}
+
+int
+resource_load(XrmDatabase db, char *name, enum resource_type rtype, void *dst)
+{
+	char **sdst = dst;
+	int *idst = dst;
+	float *fdst = dst;
+
+	char fullname[256];
+	char fullclass[256];
+	char *type;
+	XrmValue ret;
+
+	snprintf(fullname, sizeof(fullname), "%s.%s", "slock", name);
+	snprintf(fullclass, sizeof(fullclass), "%s.%s", "Slock", name);
+	fullname[sizeof(fullname) - 1] = fullclass[sizeof(fullclass) - 1] = '\0';
+
+	XrmGetResource(db, fullname, fullclass, &type, &ret);
+	if (ret.addr == NULL || strncmp("String", type, 64))
+		return 1;
+
+	switch (rtype) {
+	case STRING:
+		*sdst = ret.addr;
+		break;
+	case INTEGER:
+		*idst = strtoul(ret.addr, NULL, 10);
+		break;
+	case FLOAT:
+		*fdst = strtof(ret.addr, NULL);
+		break;
+	}
+	return 0;
+}
+
+void
+config_init(Display *dpy)
+{
+	char *resm;
+	XrmDatabase db;
+	ResourcePref *p;
+
+	XrmInitialize();
+	resm = XResourceManagerString(dpy);
+	if (!resm)
+		return;
+
+	db = XrmGetStringDatabase(resm);
+	for (p = resources; p < resources + LEN(resources); p++)
+		resource_load(db, p->name, p->type, p->dst);
 }
 
 static void
@@ -354,6 +447,34 @@ main(int argc, char **argv) {
 		die("slock: setgid: %s\n", strerror(errno));
 	if (setuid(duid) < 0)
 		die("slock: setuid: %s\n", strerror(errno));
+
+	config_init(dpy);
+
+	/* Load picture */
+        Imlib_Image buffer = imlib_load_image(background_image);
+	imlib_context_set_image(buffer);
+        int background_image_width = imlib_image_get_width();
+        int background_image_height = imlib_image_get_height();
+
+        /* Create an image to be rendered */
+	Screen *scr = ScreenOfDisplay(dpy, DefaultScreen(dpy));
+	image = imlib_create_image(scr->width, scr->height);
+        imlib_context_set_image(image);
+
+        /* Fill the image for every X monitor */
+        XRRMonitorInfo	*monitors;
+        int number_of_monitors;
+        monitors = XRRGetMonitors(dpy, RootWindow(dpy, XScreenNumberOfScreen(scr)), True, &number_of_monitors);
+
+        int i;
+        for (i = 0; i < number_of_monitors; i++) {
+            imlib_blend_image_onto_image(buffer, 0, 0, 0, background_image_width, background_image_height, monitors[i].x, monitors[i].y, monitors[i].width, monitors[i].height);
+        }
+
+        /* Clean up */
+        imlib_context_set_image(buffer);
+        imlib_free_image();
+        imlib_context_set_image(image);
 
 	/* check for Xrandr support */
 	rr.active = XRRQueryExtension(dpy, &rr.evbase, &rr.errbase);
