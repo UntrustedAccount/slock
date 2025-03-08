@@ -1,5 +1,5 @@
 /* user and group to drop privileges to */
-static const char *user  = "nobody";
+static const char *user  = "daniel";
 static const char *group = "nobody";
 
 static const char *colorname[NUMCOLS] = {
@@ -14,7 +14,7 @@ static const char *colorname[NUMCOLS] = {
  * Xresources preferences to load at startup
  */
 ResourcePref resources[] = {
-		{ "color8",       STRING,  &colorname[BACKGROUND] },
+		{ "color2",       STRING,  &colorname[BACKGROUND] },
 		{ "color0",       STRING,  &colorname[INIT] },
 		{ "color4",       STRING,  &colorname[INPUT] },
 		{ "color1",       STRING,  &colorname[FAILED] },
@@ -25,10 +25,10 @@ ResourcePref resources[] = {
 static const int failonclear = 1;
 
 /* Background image path, should be available to the user above */
-static const char* background_image = "";
+static const char* background_image = "/home/daniel/.walls/centered/wallhaven-qzy38l.png";
 
 /* insert grid pattern with scale 1:1, the size can be changed with logosize */
-static const int logosize = 75;
+static const int logosize = 50;
 static const int logow = 12;	/* grid width and height for right center alignment*/
 static const int logoh = 6;
 
